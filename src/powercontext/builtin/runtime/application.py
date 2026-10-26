@@ -166,6 +166,7 @@ from powercontext.builtin.runtime._scope_cache import (
     ScopeCacheObserver,
     ScopeEvictor,
 )
+from powercontext.builtin.runtime.context_pack import ContextPack, ContextPackDelta, ContextPackError
 from powercontext.builtin.runtime.decision_model import DecisionModel
 from powercontext.builtin.runtime.errors import InvalidRuntimeRequestError, TopicMemoryProcessingUnavailableError
 from powercontext.builtin.runtime.models import (
@@ -846,6 +847,33 @@ class ScopedContextApplication:
             if authorize_scopes is not None:
                 await authorize_scopes((self.scope_id, *scope.context_references))
             return await self._prepare(request, scope)
+
+    async def prepare_incremental(
+        self,
+        request: PrepareContextRequest,
+        /,
+        base_pack: ContextPack | None = None,
+        *,
+        authorize_scopes: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
+    ) -> ContextPack | ContextPackDelta:
+        """Prepare context as a full Context Pack, or as a delta against ``base_pack``.
+
+        The target body is exactly what :meth:`prepare` returns for ``request``; an
+        empty prepared context (``content=None``) becomes the empty pack. Without a
+        base the complete target pack is returned. With a base the result is a
+        :class:`ContextPackDelta` that a receiver holding only the serialized base
+        pack can apply to rebuild the target pack.
+        """
+        if base_pack is not None:
+            if isinstance(base_pack, (bytes, bytearray, memoryview)):
+                base_pack = ContextPack.from_bytes(bytes(base_pack))
+            elif not isinstance(base_pack, ContextPack):
+                raise ContextPackError("base_pack must be a ContextPack")  # noqa: TRY003
+        prepared = await self.prepare(request, authorize_scopes=authorize_scopes)
+        target = ContextPack.from_content(prepared.content)
+        if base_pack is None:
+            return target
+        return ContextPackDelta.between(base_pack, target)
 
     async def _prepare(self, request: PrepareContextRequest, scope: ScopeDescriptor, /) -> PreparedContext:
         build, effort = await self._prepare_build(request, scope)
