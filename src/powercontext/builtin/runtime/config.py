@@ -208,6 +208,22 @@ class RuntimeConfig(BaseModel):
     dream_budget: DreamBudget = Field(default_factory=DreamBudget)
     topic_memory_schedule_seconds: float | None = Field(default=None, gt=0)
     topic_memory_source_window_limit: int = Field(default=10, ge=1)
+    # Count admission: start one ordinary processing invocation once this many
+    # new Source journal identities exist after the binding's last successful
+    # cursor. ``None`` keeps count admission disabled; time admission is
+    # independent and the two conditions are ORed.
+    memory_source_count_threshold: int | None = None
+    topic_memory_source_count_threshold: int | None = None
+
+    @field_validator("memory_source_count_threshold", "topic_memory_source_count_threshold", mode="before")
+    @classmethod
+    def require_strict_positive_count_threshold(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if type(value) is not int or value < 1:
+            raise ValueError("Source count threshold must be a strictly positive integer or None")  # noqa: TRY003
+        return value
+
     topic_memory_history_max_candidates: int = Field(default=20, ge=1, le=MAX_TOPIC_MEMORY_SEARCH_LIMIT)
     topic_memory_history_rrf_threshold: int = Field(default=70, ge=0, le=100)
     topic_memory_history_min_candidates: int = Field(default=5, ge=1, le=MAX_TOPIC_MEMORY_SEARCH_LIMIT)
