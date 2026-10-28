@@ -249,6 +249,7 @@ from powercontext.builtin.runtime.recall_sufficiency import (
     build_recall_candidates,
     recall_effort,
 )
+from powercontext.builtin.runtime.source_lifecycle import SourceLifecycleApplication
 from powercontext.builtin.runtime.statistics import RelationalScopedStatistics, overview_selection
 from powercontext.builtin.scope import ScopeApplication, ScopeDescriptor, ScopeSelection
 from powercontext.builtin.scope.subject_sources import SubjectSourceService
@@ -2597,6 +2598,26 @@ class ScopedMemoryApplication:
                 entry=_entry_record(updated, retired),
             )
 
+    async def reactivate(self, request: ReactivateMemoryEntryRequest, /) -> MemoryMutationResult:
+        async with self._runtime._context(
+            self.scope_id,
+            embedding_purpose=ModelUsagePurpose.MEMORY_INDEXING,
+        ) as context:
+            async with self._runtime._locked(self.scope_id):
+                service = context.artifacts.memory
+                current, entry = await _current_citation(
+                    service,
+                    context.artifacts.memory_artifact_id,
+                    request.citation,
+                )
+                updated = await service.reactivate(current, entries=(entry,), reason=request.reason)
+            restored = next(item for item in await service.entries(updated) if item.entry_id == entry.entry_id)
+            return MemoryMutationResult(
+                previous_revision=current.revision,
+                memory_ref=updated.as_ref(),
+                entry=_entry_record(updated, restored),
+            )
+
     async def changes(self, *, since_revision: int | None = None) -> MemoryChangesPage:
         async with self._runtime._context(self.scope_id) as context:
             service = context.artifacts.memory
@@ -2711,7 +2732,29 @@ class ScopedTopicMemoryApplication:
                         "unit": "topic-memory",
                     },
                 )
-        return result
+        return await self._drop_withdrawn_topics(result)
+
+    async def _drop_withdrawn_topics(self, result: TopicMemorySearchResult) -> TopicMemorySearchResult:
+        """Remove topics whose supporting evidence was withdrawn.
+
+        A withdrawn Topic keeps its immutable Revision, so an exact read still
+        resolves the original content; it simply no longer enters recall.
+        """
+
+        service = getattr(self._runtime, "lifecycle", None)
+        if service is None or not result.hits:
+            return result
+        scope_service = service.for_scope(self.scope_id)
+        inactive: set[str] = set()
+        for hit in result.hits:
+            reference = hit.artifact_ref
+            if not await scope_service.is_topic_available(reference):
+                inactive.add(reference.artifact_id)
+        if not inactive:
+            return result
+        return result.model_copy(
+            update={"hits": tuple(hit for hit in result.hits if hit.artifact_ref.artifact_id not in inactive)}
+        )
 
     async def _search_with_embedding(
         self,
@@ -3137,6 +3180,7 @@ class BuiltinRuntime:
         self.handoff = HandoffApplication(self)
         self.work = WorkApplication(self)
         self.memory = MemoryApplication(self)
+        self.lifecycle = SourceLifecycleApplication(self)
         self.topic_memory = TopicMemoryApplication(self)
         self.records = RecordApplication(self)
         self.prompts = PromptApplication(self)
